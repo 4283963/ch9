@@ -9,7 +9,6 @@ import {
   Color4,
   MeshBuilder,
   StandardMaterial,
-  Texture,
   DynamicTexture,
   Mesh,
   Animation,
@@ -20,7 +19,7 @@ import {
   PBRMaterial,
   GlowLayer,
   Matrix,
-  Space
+  InstancedMesh
 } from '@babylonjs/core'
 import { useRackStore } from '@/store/rackStore'
 
@@ -28,6 +27,13 @@ const UNIT = 1.0
 const TRACK_WIDTH = 0.15
 const LAYER_HEIGHT = 4.5
 const SHELF_HEIGHT = 3.5
+
+const MAX_SHUTTLES = 16
+const LABEL_ATLAS_WIDTH = 1024
+const LABEL_ATLAS_HEIGHT = 256
+const LABEL_CELL_WIDTH = 128
+const LABEL_CELL_HEIGHT = 64
+const LABELS_PER_ROW = Math.floor(LABEL_ATLAS_WIDTH / LABEL_CELL_WIDTH)
 
 export class RackSceneEngine {
   constructor(canvas) {
@@ -61,22 +67,38 @@ export class RackSceneEngine {
     this.onShuttleClick = null
     this._boundRender = null
     this._resizeHandler = null
+
+    this._sharedMaterials = new Map()
+    this._labelAtlas = null
+    this._labelAtlasMat = null
+    this._labelCells = new Map()
+    this._nextLabelCell = 0
+    this._pointerObserver = null
+
+    this._instancedMeshes = []
+    this._allMaterials = new Set()
+    this._allTextures = new Set()
   }
 
   async init() {
     this.store = useRackStore()
-    this.engine = new Engine(this.canvas, true, {
-      preserveDrawingBuffer: true,
-      stencil: true
+    this.engine = new Engine(this.canvas, false, {
+      preserveDrawingBuffer: false,
+      stencil: false,
+      antialias: false,
+      powerPreference: 'high-performance'
     })
     this.scene = new Scene(this.engine)
     this.scene.clearColor = new Color4(0.03, 0.05, 0.10, 1.0)
     this.scene.autoClear = true
+    this.scene.blockMaterialDirtyMechanism = true
 
     this._setupCamera()
     this._setupLights()
     this._setupPostProcess()
     this._buildFloorGrid()
+    this._createSharedMaterials()
+    this._createLabelAtlas()
 
     this.config = {
       rows: this.store.rackConfig.rows,
@@ -85,6 +107,7 @@ export class RackSceneEngine {
     }
 
     this._buildRackSystem()
+    this._setupGlobalPointerHandler()
     this._setupStoreWatchers()
     this._startRenderLoop()
   }
@@ -121,28 +144,176 @@ export class RackSceneEngine {
     sun.position = new Vector3(10, 30, 8)
     sun.intensity = 1.2
 
-    this.shadowGenerator = new ShadowGenerator(2048, sun)
+    this.shadowGenerator = new ShadowGenerator(1024, sun)
     this.shadowGenerator.useBlurExponentialShadowMap = true
-    this.shadowGenerator.blurKernel = 16
+    this.shadowGenerator.blurKernel = 8
+    this.shadowGenerator.bias = 0.0005
   }
 
   _setupPostProcess() {
     this.pipeline = new DefaultRenderingPipeline('pipeline', true, this.scene, [this.camera])
-    this.pipeline.samples = 4
+    this.pipeline.samples = 2
     this.pipeline.fxaaEnabled = true
-    this.pipeline.fxaa.samples = 4
+    this.pipeline.fxaa.samples = 2
 
     this.pipeline.bloomEnabled = true
-    this.pipeline.bloomThreshold = 0.7
-    this.pipeline.bloomWeight = 0.4
-    this.pipeline.bloomKernel = 32
-    this.pipeline.bloomScale = 0.5
+    this.pipeline.bloomThreshold = 0.85
+    this.pipeline.bloomWeight = 0.25
+    this.pipeline.bloomKernel = 16
+    this.pipeline.bloomScale = 0.25
 
-    this.pipeline.samples = 4
     this.glowLayer = new GlowLayer('glow', this.scene, {
-      mainTextureFixedSize: 512,
-      blurKernelSize: 16
+      mainTextureFixedSize: 256,
+      blurKernelSize: 8
     })
+  }
+
+  _createSharedMaterials() {
+    for (let layer = 0; layer < this.config.layers; layer++) {
+      const baseY = layer * LAYER_HEIGHT
+
+      const trackPlateMat = new StandardMaterial(`trackPlateMat_layer${layer}`, this.scene)
+      trackPlateMat.diffuseColor = new Color3(0.25, 0.3, 0.38)
+      trackPlateMat.specularColor = new Color3(0.1, 0.1, 0.15)
+      trackPlateMat.emissiveColor = new Color3(0.02, 0.04, 0.08)
+      this._sharedMaterials.set(`trackPlate_layer${layer}`, trackPlateMat)
+      this._allMaterials.add(trackPlateMat)
+
+      const railMat = new StandardMaterial(`railMat_layer${layer}`, this.scene)
+      railMat.diffuseColor = new Color3(0.55, 0.6, 0.68)
+      railMat.specularColor = new Color3(0.8, 0.85, 0.9)
+      railMat.specularPower = 64
+      railMat.emissiveColor = new Color3(0.05, 0.08, 0.12)
+      this._sharedMaterials.set(`rail_layer${layer}`, railMat)
+      this._allMaterials.add(railMat)
+
+      const pillarMat = new StandardMaterial(`pillarMat_layer${layer}`, this.scene)
+      pillarMat.diffuseColor = new Color3(0.45, 0.48, 0.55)
+      pillarMat.specularColor = new Color3(0.2, 0.2, 0.25)
+      this._sharedMaterials.set(`pillar_layer${layer}`, pillarMat)
+      this._allMaterials.add(pillarMat)
+
+      const beamMat = new StandardMaterial(`beamMat_layer${layer}`, this.scene)
+      beamMat.diffuseColor = new Color3(0.55, 0.4, 0.3)
+      beamMat.specularColor = new Color3(0.1, 0.08, 0.05)
+      this._sharedMaterials.set(`beam_layer${layer}`, beamMat)
+      this._allMaterials.add(beamMat)
+
+      const gridMat = new StandardMaterial(`gridMat_layer${layer}`, this.scene)
+      gridMat.emissiveColor = new Color3(0.08, 0.14, 0.25)
+      gridMat.alpha = layer === 0 ? 0.8 : 0.35
+      gridMat.disableLighting = true
+      gridMat.wireframe = true
+      this._sharedMaterials.set(`grid_layer${layer}`, gridMat)
+      this._allMaterials.add(gridMat)
+    }
+
+    const groundMat = new StandardMaterial('groundMat', this.scene)
+    groundMat.emissiveColor = new Color3(0.04, 0.06, 0.1)
+    groundMat.disableLighting = true
+    this._sharedMaterials.set('ground', groundMat)
+    this._allMaterials.add(groundMat)
+
+    const wheelMat = new StandardMaterial('wheelMat_shared', this.scene)
+    wheelMat.diffuseColor = new Color3(0.1, 0.1, 0.12)
+    wheelMat.specularColor = new Color3(0.3, 0.3, 0.35)
+    this._sharedMaterials.set('wheel', wheelMat)
+    this._allMaterials.add(wheelMat)
+
+    const topMat = new StandardMaterial('topMat_shared', this.scene)
+    topMat.diffuseColor = new Color3(0.15, 0.18, 0.24)
+    topMat.specularColor = new Color3(0.6, 0.65, 0.7)
+    this._sharedMaterials.set('topPlate', topMat)
+    this._allMaterials.add(topMat)
+
+    const antennaMat = new StandardMaterial('antennaMat_shared', this.scene)
+    antennaMat.diffuseColor = new Color3(0.6, 0.6, 0.7)
+    antennaMat.emissiveColor = new Color3(0.2, 0.4, 0.8)
+    this._sharedMaterials.set('antenna', antennaMat)
+    this._allMaterials.add(antennaMat)
+
+    const liftMat = new StandardMaterial('liftMat', this.scene)
+    liftMat.diffuseColor = new Color3(0.2, 0.6, 0.6)
+    liftMat.emissiveColor = new Color3(0.05, 0.2, 0.25)
+    liftMat.alpha = 0.15
+    liftMat.wireframe = true
+    this._sharedMaterials.set('lift', liftMat)
+    this._allMaterials.add(liftMat)
+
+    const chargerPillarMat = new StandardMaterial('chargerPillarMat', this.scene)
+    chargerPillarMat.diffuseColor = new Color3(0.5, 0.55, 0.6)
+    chargerPillarMat.emissiveColor = new Color3(0.05, 0.2, 0.08)
+    this._sharedMaterials.set('chargerPillar', chargerPillarMat)
+    this._allMaterials.add(chargerPillarMat)
+
+    const bandMat = new StandardMaterial('cargoBandMat', this.scene)
+    bandMat.diffuseColor = new Color3(0.15, 0.15, 0.2)
+    bandMat.emissiveColor = new Color3(0.3, 0.05, 0.05)
+    this._sharedMaterials.set('cargoBand', bandMat)
+    this._allMaterials.add(bandMat)
+  }
+
+  _createLabelAtlas() {
+    this._labelAtlas = new DynamicTexture('labelAtlas', {
+      width: LABEL_ATLAS_WIDTH,
+      height: LABEL_ATLAS_HEIGHT
+    }, this.scene, false)
+    this._labelAtlas.hasAlpha = true
+    this._allTextures.add(this._labelAtlas)
+
+    const ctx = this._labelAtlas.getContext()
+    ctx.fillStyle = 'rgba(0, 0, 0, 0)'
+    ctx.fillRect(0, 0, LABEL_ATLAS_WIDTH, LABEL_ATLAS_HEIGHT)
+    this._labelAtlas.update()
+
+    this._labelAtlasMat = new StandardMaterial('labelAtlasMat', this.scene)
+    this._labelAtlasMat.diffuseTexture = this._labelAtlas
+    this._labelAtlasMat.opacityTexture = this._labelAtlas
+    this._labelAtlasMat.emissiveColor = new Color3(1, 1, 1)
+    this._labelAtlasMat.disableLighting = true
+    this._labelAtlasMat.backFaceCulling = false
+    this._allMaterials.add(this._labelAtlasMat)
+  }
+
+  _allocateLabelCell(text, color) {
+    if (this._labelCells.has(text)) {
+      return this._labelCells.get(text)
+    }
+
+    const cellIdx = this._nextLabelCell
+    if (cellIdx >= MAX_SHUTTLES) {
+      console.warn('Label atlas full, reusing cell 0')
+      return { uOffset: 0, vOffset: 0 }
+    }
+
+    const col = cellIdx % LABELS_PER_ROW
+    const row = Math.floor(cellIdx / LABELS_PER_ROW)
+    const uOffset = col * LABEL_CELL_WIDTH / LABEL_ATLAS_WIDTH
+    const vOffset = row * LABEL_CELL_HEIGHT / LABEL_ATLAS_HEIGHT
+
+    const ctx = this._labelAtlas.getContext()
+    const x = col * LABEL_CELL_WIDTH
+    const y = row * LABEL_CELL_HEIGHT
+
+    ctx.fillStyle = 'rgba(10, 16, 30, 0.75)'
+    ctx.fillRect(x, y, LABEL_CELL_WIDTH, LABEL_CELL_HEIGHT)
+
+    ctx.strokeStyle = color.toHexString()
+    ctx.lineWidth = 2
+    ctx.strokeRect(x + 1, y + 1, LABEL_CELL_WIDTH - 2, LABEL_CELL_HEIGHT - 2)
+
+    ctx.fillStyle = color.toHexString()
+    ctx.font = 'bold 28px "PingFang SC", sans-serif'
+    ctx.textAlign = 'center'
+    ctx.textBaseline = 'middle'
+    ctx.fillText(text, x + LABEL_CELL_WIDTH / 2, y + LABEL_CELL_HEIGHT / 2)
+
+    this._labelAtlas.update()
+
+    this._nextLabelCell++
+    const result = { uOffset, vOffset, cellIdx }
+    this._labelCells.set(text, result)
+    return result
   }
 
   _buildFloorGrid() {
@@ -151,20 +322,16 @@ export class RackSceneEngine {
     const ground = MeshBuilder.CreateGround('ground', {
       width: totalWidth,
       height: totalDepth,
-      subdivisions: 50
+      subdivisions: 20
     }, this.scene)
     ground.position = new Vector3(
       (this.config.cols - 1) * UNIT / 2,
       -0.01,
       (this.config.rows - 1) * UNIT / 2
     )
+    ground.material = this._sharedMaterials.get('ground')
+    ground.receiveShadows = true
 
-    const groundMat = new StandardMaterial('groundMat', this.scene)
-    groundMat.emissiveColor = new Color3(0.04, 0.06, 0.1)
-    groundMat.disableLighting = true
-    ground.material = groundMat
-
-    const gridSize = Math.max(this.config.cols, this.config.rows) * UNIT + 2
     for (let i = 0; i < this.config.layers + 1; i++) {
       const grid = MeshBuilder.CreateTiledGround(`floorGrid_${i}`, {
         xmin: -2, zmin: -2,
@@ -176,12 +343,8 @@ export class RackSceneEngine {
       grid.position.x = (this.config.cols - 1) * UNIT / 2
       grid.position.z = (this.config.rows - 1) * UNIT / 2
 
-      const gridMat = new StandardMaterial(`gridMat_${i}`, this.scene)
-      gridMat.emissiveColor = new Color3(0.08, 0.14, 0.25)
-      gridMat.alpha = i === 0 ? 0.8 : 0.35
-      gridMat.disableLighting = true
-      gridMat.wireframe = true
-      grid.material = gridMat
+      const layerIdx = Math.min(i, this.config.layers - 1)
+      grid.material = this._sharedMaterials.get(`grid_layer${layerIdx}`)
     }
   }
 
@@ -196,89 +359,183 @@ export class RackSceneEngine {
 
   _buildSingleLayer(layer) {
     const baseY = layer * LAYER_HEIGHT
+    const totalNodes = this.config.rows * this.config.cols
 
-    for (let y = 0; y < this.config.rows; y++) {
-      for (let x = 0; x < this.config.cols; x++) {
-        this._buildTrackNode(x, y, layer, baseY)
-      }
-    }
-
-    for (let y = 0; y < this.config.rows; y++) {
-      for (let x = 0; x < this.config.cols; x++) {
-        this._buildShelfUnit(x, y, layer, baseY)
-      }
-    }
-  }
-
-  _buildTrackNode(x, y, layer, baseY) {
-    const trackNode = new Mesh(`track_${layer}_${y}_${x}`, this.scene)
-    trackNode.position = new Vector3(x * UNIT, baseY + 0.02, y * UNIT)
-
-    const plate = MeshBuilder.CreateBox(`trackPlate_${layer}_${y}_${x}`, {
+    const trackPlateTemplate = MeshBuilder.CreateBox(`trackPlateTemplate_layer${layer}`, {
       width: UNIT * 0.95,
       height: 0.06,
       depth: UNIT * 0.95
     }, this.scene)
-    plate.parent = trackNode
+    trackPlateTemplate.setEnabled(false)
 
-    const plateMat = new StandardMaterial(`trackPlateMat_${layer}`, this.scene)
-    plateMat.diffuseColor = new Color3(0.25, 0.3, 0.38)
-    plateMat.specularColor = new Color3(0.1, 0.1, 0.15)
-    plateMat.emissiveColor = new Color3(0.02, 0.04, 0.08)
-    plate.material = plateMat
-    this.shadowGenerator && this.shadowGenerator.addShadowCaster(plate)
-    plate.receiveShadows = true
+    const trackPlateIM = new InstancedMesh(
+      `trackPlateIM_layer${layer}`,
+      trackPlateTemplate,
+      totalNodes,
+      this.scene
+    )
+    trackPlateIM.material = this._sharedMaterials.get(`trackPlate_layer${layer}`)
+    trackPlateIM.receiveShadows = true
+    this._instancedMeshes.push(trackPlateIM)
 
-    const xRail = MeshBuilder.CreateBox(`xRail_${layer}_${y}_${x}`, {
+    const xRailTemplate = MeshBuilder.CreateBox(`xRailTemplate_layer${layer}`, {
       width: UNIT * 0.9,
       height: 0.04,
       depth: TRACK_WIDTH
     }, this.scene)
-    xRail.parent = trackNode
-    xRail.position.y = 0.04
-    xRail.position.z = -UNIT * 0.2
+    xRailTemplate.setEnabled(false)
 
-    const yRail = MeshBuilder.CreateBox(`yRail_${layer}_${y}_${x}`, {
+    const xRailIM = new InstancedMesh(`xRailIM_layer${layer}`, xRailTemplate, totalNodes, this.scene)
+    xRailIM.material = this._sharedMaterials.get(`rail_layer${layer}`)
+    xRailIM.receiveShadows = true
+    this._instancedMeshes.push(xRailIM)
+
+    const yRailTemplate = MeshBuilder.CreateBox(`yRailTemplate_layer${layer}`, {
       width: TRACK_WIDTH,
       height: 0.04,
       depth: UNIT * 0.9
     }, this.scene)
-    yRail.parent = trackNode
-    yRail.position.y = 0.04
-    yRail.position.x = -UNIT * 0.2
+    yRailTemplate.setEnabled(false)
 
-    const railMat = new StandardMaterial(`railMat_${layer}`, this.scene)
-    railMat.diffuseColor = new Color3(0.55, 0.6, 0.68)
-    railMat.specularColor = new Color3(0.8, 0.85, 0.9)
-    railMat.specularPower = 64
-    railMat.emissiveColor = new Color3(0.05, 0.08, 0.12)
-    xRail.material = railMat
-    yRail.material = railMat
+    const yRailIM = new InstancedMesh(`yRailIM_layer${layer}`, yRailTemplate, totalNodes, this.scene)
+    yRailIM.material = this._sharedMaterials.get(`rail_layer${layer}`)
+    yRailIM.receiveShadows = true
+    this._instancedMeshes.push(yRailIM)
 
-    const key = `${layer}-${y}-${x}`
-    this.trackMeshes.set(key, trackNode)
+    const pillarTemplate = MeshBuilder.CreateBox(`pillarTemplate_layer${layer}`, {
+      width: 0.08,
+      height: SHELF_HEIGHT,
+      depth: 0.08
+    }, this.scene)
+    pillarTemplate.setEnabled(false)
 
-    const cargoKey = `cargo_${key}`
-    if (Math.random() < 0.25 && !(x === 0 && y === 0)) {
-      this._buildCargoBox(x, y, layer, baseY, cargoKey)
+    const pillarIM = new InstancedMesh(`pillarIM_layer${layer}`, pillarTemplate, totalNodes * 4, this.scene)
+    pillarIM.material = this._sharedMaterials.get(`pillar_layer${layer}`)
+    pillarIM.receiveShadows = true
+    if (this.shadowGenerator) this.shadowGenerator.addShadowCaster(pillarIM)
+    this._instancedMeshes.push(pillarIM)
+
+    const beamHTemplate = MeshBuilder.CreateBox(`beamHTemplate_layer${layer}`, {
+      width: UNIT * 0.85, height: 0.06, depth: 0.06
+    }, this.scene)
+    beamHTemplate.setEnabled(false)
+
+    const beamHIM = new InstancedMesh(`beamHIM_layer${layer}`, beamHTemplate, totalNodes * 2, this.scene)
+    beamHIM.material = this._sharedMaterials.get(`beam_layer${layer}`)
+    beamHIM.receiveShadows = true
+    if (this.shadowGenerator) this.shadowGenerator.addShadowCaster(beamHIM)
+    this._instancedMeshes.push(beamHIM)
+
+    const beamVTemplate = MeshBuilder.CreateBox(`beamVTemplate_layer${layer}`, {
+      width: 0.06, height: 0.06, depth: UNIT * 0.85
+    }, this.scene)
+    beamVTemplate.setEnabled(false)
+
+    const beamVIM = new InstancedMesh(`beamVIM_layer${layer}`, beamVTemplate, totalNodes * 2, this.scene)
+    beamVIM.material = this._sharedMaterials.get(`beam_layer${layer}`)
+    beamVIM.receiveShadows = true
+    if (this.shadowGenerator) this.shadowGenerator.addShadowCaster(beamVIM)
+    this._instancedMeshes.push(beamVIM)
+
+    const trackMat = new Matrix()
+    const xRailMat = new Matrix()
+    const yRailMat = new Matrix()
+    const pMat1 = new Matrix()
+    const pMat2 = new Matrix()
+    const pMat3 = new Matrix()
+    const pMat4 = new Matrix()
+    const beamMat1 = new Matrix()
+    const beamMat2 = new Matrix()
+    const beamMat3 = new Matrix()
+    const beamMat4 = new Matrix()
+
+    const off = UNIT * 0.4
+    let nodeIdx = 0
+
+    for (let y = 0; y < this.config.rows; y++) {
+      for (let x = 0; x < this.config.cols; x++) {
+        const px = x * UNIT
+        const py = baseY + 0.02
+        const pz = y * UNIT
+
+        Matrix.TranslationToRef(px, py, pz, trackMat)
+        trackPlateIM.setMatrixAtIndex(nodeIdx, trackMat)
+
+        Matrix.TranslationToRef(px, py + 0.04, pz - UNIT * 0.2, xRailMat)
+        xRailIM.setMatrixAtIndex(nodeIdx, xRailMat)
+
+        Matrix.TranslationToRef(px - UNIT * 0.2, py + 0.04, pz, yRailMat)
+        yRailIM.setMatrixAtIndex(nodeIdx, yRailMat)
+
+        const pillarBaseY = baseY + 0.05 + SHELF_HEIGHT / 2
+
+        Matrix.TranslationToRef(px - off, pillarBaseY, pz - off, pMat1)
+        Matrix.TranslationToRef(px + off, pillarBaseY, pz - off, pMat2)
+        Matrix.TranslationToRef(px - off, pillarBaseY, pz + off, pMat3)
+        Matrix.TranslationToRef(px + off, pillarBaseY, pz + off, pMat4)
+
+        pillarIM.setMatrixAtIndex(nodeIdx * 4, pMat1)
+        pillarIM.setMatrixAtIndex(nodeIdx * 4 + 1, pMat2)
+        pillarIM.setMatrixAtIndex(nodeIdx * 4 + 2, pMat3)
+        pillarIM.setMatrixAtIndex(nodeIdx * 4 + 3, pMat4)
+
+        const beamY = baseY + 0.05 + SHELF_HEIGHT
+
+        Matrix.TranslationToRef(px, beamY, pz - off, beamMat1)
+        Matrix.TranslationToRef(px, beamY, pz + off, beamMat2)
+        Matrix.TranslationToRef(px - off, beamY, pz, beamMat3)
+        Matrix.TranslationToRef(px + off, beamY, pz, beamMat4)
+
+        beamHIM.setMatrixAtIndex(nodeIdx * 2, beamMat1)
+        beamHIM.setMatrixAtIndex(nodeIdx * 2 + 1, beamMat2)
+        beamVIM.setMatrixAtIndex(nodeIdx * 2, beamMat3)
+        beamVIM.setMatrixAtIndex(nodeIdx * 2 + 1, beamMat4)
+
+        const key = `${layer}-${y}-${x}`
+        this.trackMeshes.set(key, { x, y, layer, position: new Vector3(px, py, pz) })
+
+        if (Math.random() < 0.15 && !(x === 0 && y === 0)) {
+          this._buildCargoBox(x, y, layer, baseY, `cargo_${key}`)
+        }
+
+        nodeIdx++
+      }
     }
+
+    trackPlateIM.refreshBoundingInfo()
+    xRailIM.refreshBoundingInfo()
+    yRailIM.refreshBoundingInfo()
+    pillarIM.refreshBoundingInfo()
+    beamHIM.refreshBoundingInfo()
+    beamVIM.refreshBoundingInfo()
+
+    trackPlateTemplate.dispose()
+    xRailTemplate.dispose()
+    yRailTemplate.dispose()
+    pillarTemplate.dispose()
+    beamHTemplate.dispose()
+    beamVTemplate.dispose()
   }
 
   _buildCargoBox(x, y, layer, baseY, cargoKey) {
+    const hue = Math.floor(Math.random() * 360)
+    const color = Color3.FromHSV(hue, 0.35, 0.9)
+    const emissive = Color3.FromHSV(hue, 0.15, 0.2)
+
+    const mat = new StandardMaterial(`${cargoKey}_mat`, this.scene)
+    mat.diffuseColor = color
+    mat.emissiveColor = emissive
+    mat.specularColor = new Color3(0.1, 0.1, 0.1)
+    this._allMaterials.add(mat)
+
     const cargo = MeshBuilder.CreateBox(cargoKey, {
       width: UNIT * 0.55,
       height: UNIT * 0.5,
       depth: UNIT * 0.55
     }, this.scene)
     cargo.position = new Vector3(x * UNIT, baseY + 0.08 + UNIT * 0.25, y * UNIT)
-
-    const cargoMat = new StandardMaterial(`cargoMat_${cargoKey}`, this.scene)
-    const hue = Math.floor(Math.random() * 360)
-    cargoMat.diffuseColor = Color3.FromHSV(hue, 0.35, 0.9)
-    cargoMat.emissiveColor = Color3.FromHSV(hue, 0.15, 0.2)
-    cargoMat.specularColor = new Color3(0.1, 0.1, 0.1)
-    cargo.material = cargoMat
-    this.shadowGenerator && this.shadowGenerator.addShadowCaster(cargo)
+    cargo.material = mat
+    if (this.shadowGenerator) this.shadowGenerator.addShadowCaster(cargo)
     cargo.receiveShadows = true
 
     const band = MeshBuilder.CreateBox(`band_${cargoKey}`, {
@@ -287,88 +544,26 @@ export class RackSceneEngine {
       depth: UNIT * 0.57
     }, this.scene)
     band.parent = cargo
-    band.position.y = 0
-    const bandMat = new StandardMaterial(`bandMat_${cargoKey}`, this.scene)
-    bandMat.diffuseColor = new Color3(0.15, 0.15, 0.2)
-    bandMat.emissiveColor = new Color3(0.3, 0.05, 0.05)
-    band.material = bandMat
+    band.material = this._sharedMaterials.get('cargoBand')
 
     this.cargoMeshes.set(cargoKey, cargo)
   }
 
-  _buildShelfUnit(x, y, layer, baseY) {
-    const frameKey = `shelfFrame_${layer}_${y}_${x}`
-    const frame = new Mesh(frameKey, this.scene)
-    frame.position = new Vector3(x * UNIT, baseY + 0.05, y * UNIT)
-
-    const buildPillar = (posX, posZ, name) => {
-      const p = MeshBuilder.CreateBox(name, {
-        width: 0.08,
-        height: SHELF_HEIGHT,
-        depth: 0.08
-      }, this.scene)
-      p.parent = frame
-      p.position = new Vector3(posX, SHELF_HEIGHT / 2, posZ)
-      const pillarMat = new StandardMaterial(`pillar_${name}`, this.scene)
-      pillarMat.diffuseColor = new Color3(0.45, 0.48, 0.55)
-      pillarMat.specularColor = new Color3(0.2, 0.2, 0.25)
-      p.material = pillarMat
-      this.shadowGenerator && this.shadowGenerator.addShadowCaster(p)
-      return p
-    }
-
-    const off = UNIT * 0.4
-    buildPillar(-off, -off, `p1_${frameKey}`)
-    buildPillar(off, -off, `p2_${frameKey}`)
-    buildPillar(-off, off, `p3_${frameKey}`)
-    buildPillar(off, off, `p4_${frameKey}`)
-
-    const beam1 = MeshBuilder.CreateBox(`beam1_${frameKey}`, {
-      width: UNIT * 0.85, height: 0.06, depth: 0.06
-    }, this.scene)
-    beam1.parent = frame
-    beam1.position = new Vector3(0, SHELF_HEIGHT, -off)
-
-    const beam2 = MeshBuilder.CreateBox(`beam2_${frameKey}`, {
-      width: UNIT * 0.85, height: 0.06, depth: 0.06
-    }, this.scene)
-    beam2.parent = frame
-    beam2.position = new Vector3(0, SHELF_HEIGHT, off)
-
-    const beam3 = MeshBuilder.CreateBox(`beam3_${frameKey}`, {
-      width: 0.06, height: 0.06, depth: UNIT * 0.85
-    }, this.scene)
-    beam3.parent = frame
-    beam3.position = new Vector3(-off, SHELF_HEIGHT, 0)
-
-    const beam4 = MeshBuilder.CreateBox(`beam4_${frameKey}`, {
-      width: 0.06, height: 0.06, depth: UNIT * 0.85
-    }, this.scene)
-    beam4.parent = frame
-    beam4.position = new Vector3(off, SHELF_HEIGHT, 0)
-
-    const beamMat = new StandardMaterial(`beamMat_${frameKey}`, this.scene)
-    beamMat.diffuseColor = new Color3(0.55, 0.4, 0.3)
-    beamMat.specularColor = new Color3(0.1, 0.08, 0.05)
-    beam1.material = beamMat
-    beam2.material = beamMat
-    beam3.material = beamMat
-    beam4.material = beamMat
-    ;[beam1, beam2, beam3, beam4].forEach(b => {
-      this.shadowGenerator && this.shadowGenerator.addShadowCaster(b)
-    })
-
-    this.rackMeshes.set(frameKey, frame)
-  }
-
   _buildPowerLines() {
+    const powerXLineMat = new PBRMaterial('powerXLineMat', this.scene)
+    powerXLineMat.albedoColor = new Color3(0.8, 0.7, 0.2)
+    powerXLineMat.emissiveColor = new Color3(0.3, 0.25, 0.05)
+    powerXLineMat.metallic = 0.8
+    powerXLineMat.roughness = 0.3
+    this._allMaterials.add(powerXLineMat)
+
     for (let layer = 0; layer < this.config.layers; layer++) {
       const baseY = layer * LAYER_HEIGHT + SHELF_HEIGHT + 0.3
 
       const xLine = MeshBuilder.CreateCylinder(`powerX_${layer}`, {
         height: this.config.cols * UNIT,
         diameter: 0.06,
-        tessellation: 8
+        tessellation: 6
       }, this.scene)
       xLine.rotation.z = Math.PI / 2
       xLine.position = new Vector3(
@@ -376,48 +571,30 @@ export class RackSceneEngine {
         baseY,
         0
       )
+      xLine.material = powerXLineMat
+      if (this.glowLayer) this.glowLayer.addIncludedOnlyMesh(xLine)
 
-      const xLineMat = new PBRMaterial(`powerXMat_${layer}`, this.scene)
-      xLineMat.albedoColor = new Color3(0.8, 0.7, 0.2)
-      xLineMat.emissiveColor = new Color3(0.3, 0.25, 0.05)
-      xLineMat.metallic = 0.8
-      xLineMat.roughness = 0.3
-      xLine.material = xLineMat
-      this.glowLayer && this.glowLayer.addIncludedOnlyMesh(xLine)
+      const yLineTemplate = MeshBuilder.CreateCylinder(`yLineTemplate_${layer}`, {
+        height: (this.config.rows - 1) * UNIT,
+        diameter: 0.05,
+        tessellation: 6
+      }, this.scene)
+      yLineTemplate.setEnabled(false)
 
+      const yLineIM = new InstancedMesh(`yLineIM_${layer}`, yLineTemplate, this.config.rows, this.scene)
+      yLineIM.material = powerXLineMat
+      this._instancedMeshes.push(yLineIM)
+
+      const tmpMat = new Matrix()
       for (let y = 0; y < this.config.rows; y++) {
-        const yLine = MeshBuilder.CreateCylinder(`powerY_${layer}_${y}`, {
-          height: this.config.rows * UNIT * 0.0,
-          diameter: 0.06
-        }, this.scene)
-        const ySeg = MeshBuilder.CreateCylinder(`powerYS_${layer}_${y}`, {
-          height: (this.config.rows - 1) * UNIT,
-          diameter: 0.05,
-          tessellation: 8
-        }, this.scene)
-        ySeg.position = new Vector3(
-          0,
-          baseY,
-          (this.config.rows - 1) * UNIT / 2
-        )
-        ySeg.parent = null
-        const group = new Mesh(`powerYGroup_${layer}_${y}`, this.scene)
-        group.position.x = y * 0 + (y === 0 ? 0 : 0)
-        ySeg.setParent(group)
-        group.position = new Vector3(
-          (this.config.cols - 1) * UNIT / 2,
-          0,
-          0
-        )
-        ySeg.position = new Vector3(
-          xLine.position.x - (this.config.cols - 1) * UNIT / 2 + y * UNIT / (this.config.rows - 1 || 1) * 0,
-          baseY,
-          (this.config.rows - 1) * UNIT / 2
-        )
-        const yMat = xLineMat.clone(`powerYMat_${layer}_${y}`)
-        ySeg.material = yMat
-        this.glowLayer && this.glowLayer.addIncludedOnlyMesh(ySeg)
+        const px = y * UNIT
+        Matrix.TranslationToRef(px, baseY, (this.config.rows - 1) * UNIT / 2, tmpMat)
+        yLineIM.setMatrixAtIndex(y, tmpMat)
+        if (this.glowLayer) this.glowLayer.addIncludedOnlyMesh(yLineIM)
       }
+
+      yLineIM.refreshBoundingInfo()
+      yLineTemplate.dispose()
 
       const nodeKey = `power_${layer}`
       this.powerLineMeshes.set(nodeKey, { xLine, layer })
@@ -435,15 +612,11 @@ export class RackSceneEngine {
       depth: UNIT * 1.0
     }, this.scene)
     lift.position = new Vector3(x * UNIT, this.config.layers * LAYER_HEIGHT / 2, y * UNIT)
+    lift.material = this._sharedMaterials.get('lift')
 
-    const liftMat = new StandardMaterial('liftMat', this.scene)
-    liftMat.diffuseColor = new Color3(0.2, 0.6, 0.6)
-    liftMat.emissiveColor = new Color3(0.05, 0.2, 0.25)
-    liftMat.alpha = 0.15
-    liftMat.wireframe = true
-    lift.material = liftMat
-
-    const label = this._createLabelMesh(`升降机`, 1.2, 0.3, new Color3(0, 1, 1))
+    const color = new Color3(0, 1, 1)
+    const cell = this._allocateLabelCell('升降机', color)
+    const label = this._createAtlasLabel(cell, 1.2, 0.3)
     label.position = new Vector3(x * UNIT, this.config.layers * LAYER_HEIGHT + 0.5, y * UNIT)
   }
 
@@ -452,7 +625,7 @@ export class RackSceneEngine {
     const charger = MeshBuilder.CreateCylinder('chargerPad', {
       height: 0.12,
       diameter: UNIT * 0.7,
-      tessellation: 32
+      tessellation: 24
     }, this.scene)
     charger.position = new Vector3(0, baseY + 0.06, 0)
 
@@ -462,63 +635,76 @@ export class RackSceneEngine {
     chargerMat.metallic = 0.6
     chargerMat.roughness = 0.3
     charger.material = chargerMat
-    this.glowLayer && this.glowLayer.addIncludedOnlyMesh(charger)
+    this._allMaterials.add(chargerMat)
+    if (this.glowLayer) this.glowLayer.addIncludedOnlyMesh(charger)
 
+    const pillarTemplate = MeshBuilder.CreateCylinder('chargerPillarTemplate', {
+      height: 1.5,
+      diameter: 0.06,
+      tessellation: 8
+    }, this.scene)
+    pillarTemplate.setEnabled(false)
+
+    const pillarIM = new InstancedMesh('chargerPillarIM', pillarTemplate, 4, this.scene)
+    pillarIM.material = this._sharedMaterials.get('chargerPillar')
+    this._instancedMeshes.push(pillarIM)
+
+    const tmpMat = new Matrix()
     for (let i = 0; i < 4; i++) {
-      const pillar = MeshBuilder.CreateCylinder(`chargerPillar_${i}`, {
-        height: 1.5,
-        diameter: 0.06
-      }, this.scene)
       const angle = (i / 4) * Math.PI * 2
-      pillar.position = new Vector3(
+      Matrix.TranslationToRef(
         Math.cos(angle) * UNIT * 0.4,
         baseY + 0.81,
-        Math.sin(angle) * UNIT * 0.4
+        Math.sin(angle) * UNIT * 0.4,
+        tmpMat
       )
-      const pMat = new StandardMaterial(`cpMat_${i}`, this.scene)
-      pMat.diffuseColor = new Color3(0.5, 0.55, 0.6)
-      pMat.emissiveColor = new Color3(0.05, 0.2, 0.08)
-      pillar.material = pMat
+      pillarIM.setMatrixAtIndex(i, tmpMat)
     }
+    pillarIM.refreshBoundingInfo()
+    pillarTemplate.dispose()
 
-    const label = this._createLabelMesh('充电站', 1.2, 0.3, new Color3(0.2, 1, 0.4))
+    const color = new Color3(0.2, 1, 0.4)
+    const cell = this._allocateLabelCell('充电站', color)
+    const label = this._createAtlasLabel(cell, 1.2, 0.3)
     label.position = new Vector3(0, 2.2, 0)
   }
 
-  _createLabelMesh(text, width, height, color) {
-    const texture = new DynamicTexture(`label_${text}_${Math.random()}`, {
-      width: 512,
-      height: 128
-    }, this.scene, false)
-    texture.hasAlpha = true
-
-    const ctx = texture.getContext()
-    ctx.fillStyle = 'rgba(10, 16, 30, 0.7)'
-    ctx.fillRect(0, 0, 512, 128)
-    ctx.strokeStyle = color.toHexString()
-    ctx.lineWidth = 4
-    ctx.strokeRect(2, 2, 508, 124)
-    ctx.fillStyle = color.toHexString()
-    ctx.font = 'bold 64px "PingFang SC", sans-serif'
-    ctx.textAlign = 'center'
-    ctx.textBaseline = 'middle'
-    ctx.fillText(text, 256, 64)
-    texture.update()
-
-    const plane = MeshBuilder.CreatePlane(`labelPlane_${text}`, {
+  _createAtlasLabel(cellInfo, width, height) {
+    const plane = MeshBuilder.CreatePlane(`labelPlane_${cellInfo.cellIdx}`, {
       width,
       height,
       sideOrientation: Mesh.DOUBLESIDE
     }, this.scene)
-    const mat = new StandardMaterial(`labelMat_${text}`, this.scene)
-    mat.diffuseTexture = texture
-    mat.opacityTexture = texture
-    mat.emissiveColor = new Color3(1, 1, 1)
-    mat.disableLighting = true
-    mat.backFaceCulling = false
+
+    const mat = this._labelAtlasMat.clone(`labelMat_${cellInfo.cellIdx}`)
+    this._allMaterials.add(mat)
+    mat.diffuseTexture = this._labelAtlas
+    mat.opacityTexture = this._labelAtlas
+    mat.diffuseTexture.uScale = LABEL_CELL_WIDTH / LABEL_ATLAS_WIDTH
+    mat.diffuseTexture.vScale = LABEL_CELL_HEIGHT / LABEL_ATLAS_HEIGHT
+    mat.diffuseTexture.uOffset = cellInfo.uOffset
+    mat.diffuseTexture.vOffset = cellInfo.vOffset
+    mat.opacityTexture.uScale = LABEL_CELL_WIDTH / LABEL_ATLAS_WIDTH
+    mat.opacityTexture.vScale = LABEL_CELL_HEIGHT / LABEL_ATLAS_HEIGHT
+    mat.opacityTexture.uOffset = cellInfo.uOffset
+    mat.opacityTexture.vOffset = cellInfo.vOffset
+
     plane.material = mat
     plane.billboardMode = Mesh.BILLBOARDMODE_ALL
     return plane
+  }
+
+  _setupGlobalPointerHandler() {
+    this._pointerObserver = this.scene.onPointerObservable.add((pointerInfo) => {
+      if (pointerInfo.type === 1 && pointerInfo.pickInfo && pointerInfo.pickInfo.hit) {
+        let picked = pointerInfo.pickInfo.pickedMesh
+        while (picked && !picked.metadata?.carCode) picked = picked.parent
+        if (picked && picked.metadata?.carCode) {
+          const code = picked.metadata.carCode
+          if (this.onShuttleClick) this.onShuttleClick(code)
+        }
+      }
+    })
   }
 
   _setupStoreWatchers() {
@@ -563,12 +749,13 @@ export class RackSceneEngine {
     const hex = this.shuttleColors[shuttle.carCode]
     const color = Color3.FromHexString(hex)
     bodyMat.albedoColor = color
-    bodyMat.emissiveColor = color.scale(0.4)
+    bodyMat.emissiveColor = color.scale(0.3)
     bodyMat.metallic = 0.7
     bodyMat.roughness = 0.25
     body.material = bodyMat
-    this.glowLayer && this.glowLayer.addIncludedOnlyMesh(body)
-    this.shadowGenerator && this.shadowGenerator.addShadowCaster(body)
+    this._allMaterials.add(bodyMat)
+    if (this.glowLayer) this.glowLayer.addIncludedOnlyMesh(body)
+    if (this.shadowGenerator) this.shadowGenerator.addShadowCaster(body)
 
     const topPlate = MeshBuilder.CreateBox(`topPlate_${shuttle.carCode}`, {
       width: UNIT * 0.6,
@@ -577,18 +764,14 @@ export class RackSceneEngine {
     }, this.scene)
     topPlate.parent = group
     topPlate.position.y = 0.54
-
-    const topMat = new StandardMaterial(`topMat_${shuttle.carCode}`, this.scene)
-    topMat.diffuseColor = new Color3(0.15, 0.18, 0.24)
-    topMat.specularColor = new Color3(0.6, 0.65, 0.7)
-    topPlate.material = topMat
-    this.shadowGenerator && this.shadowGenerator.addShadowCaster(topPlate)
+    topPlate.material = this._sharedMaterials.get('topPlate')
+    if (this.shadowGenerator) this.shadowGenerator.addShadowCaster(topPlate)
 
     for (let i = 0; i < 4; i++) {
       const wheel = MeshBuilder.CreateCylinder(`wheel_${shuttle.carCode}_${i}`, {
         height: 0.1,
         diameter: 0.18,
-        tessellation: 16
+        tessellation: 10
       }, this.scene)
       wheel.rotation.z = Math.PI / 2
       wheel.parent = group
@@ -596,17 +779,15 @@ export class RackSceneEngine {
       const wx = (i % 2 === 0 ? -1 : 1) * off
       const wz = (i < 2 ? -1 : 1) * off
       wheel.position = new Vector3(wx, 0.09, wz)
-
-      const wMat = new StandardMaterial(`wheelMat_${shuttle.carCode}_${i}`, this.scene)
-      wMat.diffuseColor = new Color3(0.1, 0.1, 0.12)
-      wMat.specularColor = new Color3(0.3, 0.3, 0.35)
-      wheel.material = wMat
-      this.shadowGenerator && this.shadowGenerator.addShadowCaster(wheel)
+      wheel.material = this._sharedMaterials.get('wheel')
+      if (this.shadowGenerator) this.shadowGenerator.addShadowCaster(wheel)
     }
 
+    const sensorColor = new Color3(0, 1, 0.5)
     for (let i = 0; i < 4; i++) {
       const sensor = MeshBuilder.CreateSphere(`sensor_${shuttle.carCode}_${i}`, {
-        diameter: 0.06
+        diameter: 0.06,
+        segments: 8
       }, this.scene)
       sensor.parent = group
       const sf = UNIT * 0.35
@@ -616,25 +797,25 @@ export class RackSceneEngine {
       ]
       sensor.position = new Vector3(...positions[i])
       const sMat = new StandardMaterial(`sensorMat_${shuttle.carCode}_${i}`, this.scene)
-      sMat.emissiveColor = new Color3(0, 1, 0.5)
+      sMat.emissiveColor = sensorColor
       sMat.disableLighting = true
       sensor.material = sMat
-      this.glowLayer && this.glowLayer.addIncludedOnlyMesh(sensor)
+      this._allMaterials.add(sMat)
+      if (this.glowLayer) this.glowLayer.addIncludedOnlyMesh(sensor)
     }
 
     const antenna = MeshBuilder.CreateCylinder(`antenna_${shuttle.carCode}`, {
       height: 0.35,
-      diameter: 0.02
+      diameter: 0.02,
+      tessellation: 6
     }, this.scene)
     antenna.parent = group
     antenna.position = new Vector3(0, 0.75, 0)
-    const aMat = new StandardMaterial(`antennaMat_${shuttle.carCode}`, this.scene)
-    aMat.diffuseColor = new Color3(0.6, 0.6, 0.7)
-    aMat.emissiveColor = new Color3(0.2, 0.4, 0.8)
-    antenna.material = aMat
+    antenna.material = this._sharedMaterials.get('antenna')
 
     const led = MeshBuilder.CreateSphere(`led_${shuttle.carCode}`, {
-      diameter: 0.05
+      diameter: 0.05,
+      segments: 8
     }, this.scene)
     led.parent = group
     led.position = new Vector3(0, 0.95, 0)
@@ -642,9 +823,11 @@ export class RackSceneEngine {
     ledMat.emissiveColor = new Color3(0, 1, 0.5)
     ledMat.disableLighting = true
     led.material = ledMat
-    this.glowLayer && this.glowLayer.addIncludedOnlyMesh(led)
+    this._allMaterials.add(ledMat)
+    if (this.glowLayer) this.glowLayer.addIncludedOnlyMesh(led)
 
-    const label = this._createLabelMesh(shuttle.carCode, 0.9, 0.22, color)
+    const cell = this._allocateLabelMesh(shuttle.carCode, color)
+    const label = this._createAtlasLabel(cell, 0.9, 0.22)
     label.parent = group
     label.position.y = 1.2
 
@@ -654,18 +837,6 @@ export class RackSceneEngine {
       baseY,
       (shuttle.posY || 0) * UNIT
     )
-
-    const animGroup = new Animation(`carRotate_${shuttle.carCode}`,
-      'rotation.y', 30, Animation.ANIMATIONTYPE_FLOAT, Animation.ANIMATIONLOOPMODE_CYCLE)
-    const keys = [
-      { frame: 0, value: 0 },
-      { frame: 60, value: Math.PI * 2 }
-    ]
-    animGroup.setKeys(keys)
-    const ease = new CubicEase()
-    ease.setEasingMode(EasingFunction.EASINGMODE_EASEINOUT)
-    animGroup.setEasingFunction(ease)
-    led.animations = []
 
     group.metadata = {
       carCode: shuttle.carCode,
@@ -679,24 +850,20 @@ export class RackSceneEngine {
       label,
       sensorMaterials: Array.from({ length: 4 }, (_, i) =>
         this.scene.getMaterialByName(`sensorMat_${shuttle.carCode}_${i}`)
-      )
+      ),
+      ledMaterial: ledMat,
+      bodyMaterial: bodyMat,
+      labelMaterial: label.material
     }
 
     group.isPickable = true
     group.getChildMeshes().forEach(m => { m.isPickable = true })
 
-    this.scene.onPointerObservable.add((pointerInfo) => {
-      if (pointerInfo.type === 1 && pointerInfo.pickInfo && pointerInfo.pickInfo.hit) {
-        let picked = pointerInfo.pickInfo.pickedMesh
-        while (picked && !picked.metadata?.carCode) picked = picked.parent
-        if (picked && picked.metadata?.carCode) {
-          const code = picked.metadata.carCode
-          if (this.onShuttleClick) this.onShuttleClick(code)
-        }
-      }
-    })
-
     this.shuttleMeshes.set(shuttle.carCode, group)
+  }
+
+  _allocateLabelMesh(text, color) {
+    return this._allocateLabelCell(text, color)
   }
 
   _updateShuttle(shuttle) {
@@ -727,9 +894,8 @@ export class RackSceneEngine {
       OFFLINE: new Color3(0.4, 0.4, 0.4)
     }[status] || new Color3(1, 1, 1)
 
-    if (meta.led) {
-      const ledMat = meta.led.material
-      if (ledMat) ledMat.emissiveColor = ledColor
+    if (meta.ledMaterial) {
+      meta.ledMaterial.emissiveColor = ledColor
     }
 
     const sensorColor = shuttle.powerSupplyOk === false
@@ -754,22 +920,29 @@ export class RackSceneEngine {
       y * UNIT
     )
 
-    const animType = Animation.ANIMATIONTYPE_VECTOR3
-    const animName = `shuttleAnim_${group.name}_${Date.now()}`
-    const anim = new Animation(animName, 'position', 60, animType, Animation.ANIMATIONLOOPMODE_CONSTANT)
-
     const startPos = group.position.clone()
     const dist = Vector3.Distance(startPos, targetPos)
     const frames = Math.max(10, Math.min(40, Math.ceil(dist * 25)))
+
+    let anim = this.animatingShuttles.get(group.name)
+    if (!anim) {
+      anim = new Animation(
+        `shuttleAnim_${group.name}`,
+        'position',
+        60,
+        Animation.ANIMATIONTYPE_VECTOR3,
+        Animation.ANIMATIONLOOPMODE_CONSTANT
+      )
+      const ease = new CubicEase()
+      ease.setEasingMode(EasingFunction.EASINGMODE_EASEINOUT)
+      anim.setEasingFunction(ease)
+      this.animatingShuttles.set(group.name, anim)
+    }
 
     anim.setKeys([
       { frame: 0, value: startPos },
       { frame: frames, value: targetPos }
     ])
-
-    const ease = new CubicEase()
-    ease.setEasingMode(EasingFunction.EASINGMODE_EASEINOUT)
-    anim.setEasingFunction(ease)
 
     this.scene.stopAnimation(group)
     this.scene.beginDirectAnimation(group, [anim], 0, frames, false, 1.0)
@@ -778,10 +951,41 @@ export class RackSceneEngine {
   _removeShuttle(carCode) {
     const group = this.shuttleMeshes.get(carCode)
     if (group) {
-      group.getChildMeshes().forEach(m => m.dispose())
+      this.scene.stopAnimation(group)
+
+      if (group.metadata) {
+        if (group.metadata.bodyMaterial) {
+          this._allMaterials.delete(group.metadata.bodyMaterial)
+          group.metadata.bodyMaterial.dispose()
+        }
+        if (group.metadata.ledMaterial) {
+          this._allMaterials.delete(group.metadata.ledMaterial)
+          group.metadata.ledMaterial.dispose()
+        }
+        if (group.metadata.labelMaterial) {
+          this._allMaterials.delete(group.metadata.labelMaterial)
+          group.metadata.labelMaterial.dispose()
+        }
+        if (group.metadata.sensorMaterials) {
+          group.metadata.sensorMaterials.forEach(m => {
+            if (m) {
+              this._allMaterials.delete(m)
+              m.dispose()
+            }
+          })
+        }
+      }
+
+      group.getChildMeshes().forEach(m => {
+        if (m.geometry) m.geometry.dispose()
+        m.dispose()
+      })
+      if (group.geometry) group.geometry.dispose()
       group.dispose()
+
       this.shuttleMeshes.delete(carCode)
       delete this.shuttleColors[carCode]
+      this.animatingShuttles.delete(group.name)
     }
   }
 
@@ -823,12 +1027,95 @@ export class RackSceneEngine {
   dispose() {
     this._pollInterval && clearInterval(this._pollInterval)
     window.removeEventListener('resize', this._resizeHandler)
-    this.engine.stopRenderLoop()
-    this.scene.dispose()
-    this.engine.dispose()
+
+    if (this._pointerObserver && this.scene) {
+      this.scene.onPointerObservable.remove(this._pointerObserver)
+      this._pointerObserver = null
+    }
+
+    if (this.engine) {
+      this.engine.stopRenderLoop()
+    }
+
+    if (this._labelCells) this._labelCells.clear()
+    if (this.shuttleColors) this.shuttleColors = {}
+    if (this.animatingShuttles) this.animatingShuttles.clear()
+
+    this.shuttleMeshes.forEach((group, code) => {
+      this.scene.stopAnimation(group)
+      if (group.metadata) {
+        if (group.metadata.bodyMaterial) group.metadata.bodyMaterial.dispose()
+        if (group.metadata.ledMaterial) group.metadata.ledMaterial.dispose()
+        if (group.metadata.labelMaterial) group.metadata.labelMaterial.dispose()
+        if (group.metadata.sensorMaterials) {
+          group.metadata.sensorMaterials.forEach(m => m && m.dispose())
+        }
+      }
+      group.getChildMeshes().forEach(m => {
+        if (m.geometry) m.geometry.dispose()
+        m.dispose()
+      })
+      if (group.geometry) group.geometry.dispose()
+      group.dispose()
+    })
     this.shuttleMeshes.clear()
-    this.trackMeshes.clear()
+
+    this.cargoMeshes.forEach(cargo => {
+      if (cargo.material) {
+        this._allMaterials.delete(cargo.material)
+        cargo.material.dispose()
+      }
+      if (cargo.geometry) cargo.geometry.dispose()
+      cargo.dispose()
+    })
     this.cargoMeshes.clear()
+
+    this._instancedMeshes.forEach(im => {
+      if (im.sourceMesh) im.sourceMesh.dispose()
+      if (im.geometry) im.geometry.dispose()
+      im.dispose()
+    })
+    this._instancedMeshes = []
+
+    this._allMaterials.forEach(mat => {
+      try {
+        if (mat.dispose) mat.dispose()
+      } catch (e) { /* ignore */ }
+    })
+    this._allMaterials.clear()
+
+    this._allTextures.forEach(tex => {
+      try {
+        if (tex.dispose) tex.dispose()
+      } catch (e) { /* ignore */ }
+    })
+    this._allTextures.clear()
+
+    this._sharedMaterials.clear()
+
+    if (this.pipeline) {
+      this.pipeline.dispose()
+      this.pipeline = null
+    }
+    if (this.glowLayer) {
+      this.glowLayer.dispose()
+      this.glowLayer = null
+    }
+    if (this.shadowGenerator) {
+      this.shadowGenerator.dispose()
+      this.shadowGenerator = null
+    }
+
+    if (this.scene) {
+      this.scene.dispose()
+      this.scene = null
+    }
+    if (this.engine) {
+      this.engine.dispose()
+      this.engine = null
+    }
+
+    this.trackMeshes.clear()
     this.rackMeshes.clear()
     this.powerLineMeshes.clear()
   }
