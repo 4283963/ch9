@@ -2,15 +2,19 @@ package com.shuttle.rack.service;
 
 import com.shuttle.rack.config.RackConfig;
 import com.shuttle.rack.dto.ShuttlePositionUpdateDTO;
+import com.shuttle.rack.dto.TrackFaultDTO;
 import com.shuttle.rack.entity.ShuttleCar;
 import com.shuttle.rack.entity.enums.Direction;
 import com.shuttle.rack.entity.enums.ShuttleStatus;
 import com.shuttle.rack.repository.ShuttleCarRepository;
+import com.shuttle.rack.websocket.RackWebSocketHandler;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.time.Duration;
+import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Optional;
 import java.util.stream.Collectors;
@@ -23,6 +27,7 @@ public class ShuttleCarService {
     private final ShuttleCarRepository shuttleCarRepository;
     private final TrackOccupancyService trackOccupancyService;
     private final RackConfig rackConfig;
+    private final RackWebSocketHandler webSocketHandler;
 
     public List<ShuttleCar> findAll() {
         return shuttleCarRepository.findAll();
@@ -86,12 +91,82 @@ public class ShuttleCarService {
 
         if (dto.getDirection() != null) car.setDirection(dto.getDirection());
         if (dto.getStatus() != null) car.setStatus(dto.getStatus());
-        if (dto.getBatteryLevel() != null) car.setBatteryLevel(dto.getBatteryLevel());
-        if (dto.getPowerSupplyOk() != null) car.setPowerSupplyOk(dto.getPowerSupplyOk());
         if (dto.getTrackAlignmentOffset() != null) car.setTrackAlignmentOffset(dto.getTrackAlignmentOffset());
         if (dto.getSpeed() != null) car.setSpeed(dto.getSpeed());
+        if (dto.getPowerSupplyOk() != null) car.setPowerSupplyOk(dto.getPowerSupplyOk());
+
+        if (dto.getBatteryLevel() != null) {
+            detectAndProcessBatteryDip(car, dto.getBatteryLevel());
+        }
 
         return shuttleCarRepository.save(car);
+    }
+
+    @Transactional
+    public void detectAndProcessBatteryDip(ShuttleCar car, Double newBattery) {
+        LocalDateTime now = LocalDateTime.now();
+        Double oldBattery = car.getLastBatteryLevel();
+
+        if (!car.getBatteryDipDetected() &&
+            oldBattery != null &&
+            oldBattery > 20.0 &&
+            newBattery < 5.0) {
+
+            car.setBatteryDipDetected(true);
+            car.setBatteryDipStartTime(now);
+            car.setBatteryDipX(car.getPosX());
+            car.setBatteryDipY(car.getPosY());
+            car.setBatteryDipLayer(car.getPosLayer());
+            log.warn("穿梭车 [{}] 检测到电量骤跌: {}% → {}%, 位置: ({},{},{})",
+                    car.getCarCode(), oldBattery, newBattery,
+                    car.getPosX(), car.getPosY(), car.getPosLayer());
+        }
+
+        if (car.getBatteryDipDetected() &&
+            car.getBatteryDipStartTime() != null &&
+            newBattery > 15.0 &&
+            Duration.between(car.getBatteryDipStartTime(), now).getSeconds() <= 2) {
+
+            TrackFaultDTO fault = TrackFaultDTO.builder()
+                    .trackX(car.getBatteryDipX())
+                    .trackY(car.getBatteryDipY())
+                    .trackLayer(car.getBatteryDipLayer())
+                    .shuttleCode(car.getCarCode())
+                    .shuttleName(car.getCarName())
+                    .faultType("POWER_DIP")
+                    .severity("WARNING")
+                    .batteryBefore(oldBattery)
+                    .batteryDuring(newBattery)
+                    .batteryAfter(newBattery)
+                    .detectedAt(now)
+                    .description(String.format("滑触线接触不良: 电量在%d秒内从%.1f%%骤跌至%.1f%%后恢复",
+                            Duration.between(car.getBatteryDipStartTime(), now).getSeconds() + 1,
+                            oldBattery, car.getBatteryLevel()))
+                    .build();
+
+            webSocketHandler.broadcastTrackFault(fault);
+
+            car.setBatteryDipDetected(false);
+            car.setBatteryDipStartTime(null);
+            car.setBatteryDipX(null);
+            car.setBatteryDipY(null);
+            car.setBatteryDipLayer(null);
+        }
+
+        if (car.getBatteryDipDetected() &&
+            car.getBatteryDipStartTime() != null &&
+            Duration.between(car.getBatteryDipStartTime(), now).getSeconds() > 3) {
+            car.setBatteryDipDetected(false);
+            car.setBatteryDipStartTime(null);
+            car.setBatteryDipX(null);
+            car.setBatteryDipY(null);
+            car.setBatteryDipLayer(null);
+            log.debug("穿梭车 [{}] 电量下跌超时未恢复, 重置检测状态", car.getCarCode());
+        }
+
+        car.setLastBatteryLevel(newBattery);
+        car.setLastBatteryUpdateTime(now);
+        car.setBatteryLevel(newBattery);
     }
 
     @Transactional

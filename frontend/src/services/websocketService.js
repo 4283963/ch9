@@ -89,6 +89,11 @@ class WebSocketService {
           this.store.setSystemStatus(payload)
           break
 
+        case 'TRACK_FAULT':
+          console.warn('[WS] 收到轨道故障告警:', payload)
+          this.store.addTrackFault(payload)
+          break
+
         case 'PONG':
           break
 

@@ -12,6 +12,7 @@ export const useRackStore = defineStore('rack', () => {
   const systemStatus = ref(null)
   const powerLines = ref([])
   const tracks = ref(new Map())
+  const trackFaults = ref(new Map())
   const wsConnected = ref(false)
   const wsReconnectCount = ref(0)
   const lastUpdateTime = ref(null)
@@ -36,6 +37,10 @@ export const useRackStore = defineStore('rack', () => {
   const powerIssueShuttles = computed(() =>
     shuttleList.value.filter(s => s.powerSupplyOk === false)
   )
+
+  const trackFaultList = computed(() => Array.from(trackFaults.value.values()))
+
+  const trackFaultCount = computed(() => trackFaults.value.size)
 
   function setRackConfig(config) {
     rackConfig.value = { ...rackConfig.value, ...config }
@@ -84,6 +89,25 @@ export const useRackStore = defineStore('rack', () => {
     selectedShuttle.value = carCode || null
   }
 
+  function addTrackFault(fault) {
+    if (!fault || fault.trackX == null) return
+    const key = `${fault.trackLayer}-${fault.trackY}-${fault.trackX}`
+    trackFaults.value.set(key, {
+      ...fault,
+      faultKey: key,
+      reportedAt: fault.detectedAt || new Date().toISOString()
+    })
+    lastUpdateTime.value = Date.now()
+  }
+
+  function clearTrackFault(key) {
+    trackFaults.value.delete(key)
+  }
+
+  function clearAllTrackFaults() {
+    trackFaults.value.clear()
+  }
+
   function setWsConnected(connected) {
     wsConnected.value = connected
   }
@@ -97,6 +121,7 @@ export const useRackStore = defineStore('rack', () => {
     systemStatus.value = null
     powerLines.value = []
     tracks.value.clear()
+    trackFaults.value.clear()
     selectedShuttle.value = null
   }
 
@@ -106,6 +131,7 @@ export const useRackStore = defineStore('rack', () => {
     systemStatus,
     powerLines,
     tracks,
+    trackFaults,
     wsConnected,
     wsReconnectCount,
     lastUpdateTime,
@@ -116,6 +142,8 @@ export const useRackStore = defineStore('rack', () => {
     idleShuttles,
     lowBatteryShuttles,
     powerIssueShuttles,
+    trackFaultList,
+    trackFaultCount,
     setRackConfig,
     addOrUpdateShuttle,
     setShuttleList,
@@ -124,6 +152,9 @@ export const useRackStore = defineStore('rack', () => {
     setPowerLines,
     setTracks,
     selectShuttle,
+    addTrackFault,
+    clearTrackFault,
+    clearAllTrackFaults,
     setWsConnected,
     incrementReconnectCount,
     resetAll

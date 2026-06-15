@@ -13,7 +13,9 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Random;
 
 @Slf4j
@@ -31,6 +33,8 @@ public class ShuttleSimulationScheduler {
     private final Random random = new Random();
 
     private boolean initialized = false;
+    private final Map<String, Double> simulatedDipBatteries = new HashMap<>();
+    private long lastDipTriggerTime = 0;
 
     @Scheduled(initialDelay = 1000, fixedDelay = Long.MAX_VALUE)
     public void initializeSystem() {
@@ -95,6 +99,26 @@ public class ShuttleSimulationScheduler {
             double newBattery = Math.max(0, shuttle.getBatteryLevel() - (isMoving ? 0.05 : 0.01));
             if (newBattery < 5) {
                 newBattery = Math.min(100, newBattery + 5);
+            }
+
+            long now = System.currentTimeMillis();
+            if (simulatedDipBatteries.containsKey(shuttle.getCarCode())) {
+                double recoveredValue = simulatedDipBatteries.remove(shuttle.getCarCode());
+                newBattery = recoveredValue;
+                log.info("穿梭车 [{}] 模拟电量恢复: {}%", shuttle.getCarCode(), String.format("%.1f", newBattery));
+            } else if (now - lastDipTriggerTime > 10000 &&
+                       isMoving &&
+                       newBattery > 25.0 &&
+                       random.nextDouble() < 0.03) {
+
+                double savedBattery = newBattery;
+                newBattery = 2.0 + random.nextDouble() * 2.0;
+                simulatedDipBatteries.put(shuttle.getCarCode(), savedBattery - 0.5);
+                lastDipTriggerTime = now;
+                log.warn("穿梭车 [{}] 模拟电量骤跌: {}% → {}%",
+                        shuttle.getCarCode(),
+                        String.format("%.1f", savedBattery),
+                        String.format("%.1f", newBattery));
             }
 
             boolean powerOk = random.nextDouble() > 0.01;

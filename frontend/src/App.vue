@@ -36,6 +36,9 @@
           <div class="time-date">{{ currentDateStr }}</div>
         </div>
         <button class="btn reset-cam" @click="resetCamera">重置视角</button>
+        <button class="btn test-fault" @click="simulateTrackFault">
+          🧪 模拟轨道故障
+        </button>
       </div>
     </header>
 
@@ -134,6 +137,36 @@
 
     <footer class="app-footer">
       <div class="footer-left">
+        <div class="fault-tracks-section" v-if="store.trackFaultList.length > 0">
+          <div class="fault-header">
+            <span class="fault-title">⚠️ 故障轨道列表</span>
+            <span class="tag tag-danger">{{ store.trackFaultList.length }} 段</span>
+          </div>
+          <div class="fault-track-list">
+            <div class="fault-track-card slide-in"
+                 v-for="fault in store.trackFaultList"
+                 :key="fault.faultKey"
+                 @click="focusOnFaultTrack(fault)">
+              <div class="fault-track-header">
+                <span class="fault-track-coord">
+                  轨道 ({{ fault.trackX }}, {{ fault.trackY }}, {{ fault.trackLayer + 1 }}层)
+                </span>
+                <span class="tag tag-warning">{{ fault.faultType }}</span>
+              </div>
+              <div class="fault-track-info">
+                <span class="fault-shuttle">🚗 {{ fault.shuttleCode }}</span>
+                <span class="fault-battery">
+                  电量: {{ fault.batteryBefore?.toFixed(1) }}% → {{ fault.batteryDuring?.toFixed(1) }}%
+                </span>
+              </div>
+              <div class="fault-track-desc">{{ fault.description }}</div>
+              <div class="fault-track-time">
+                {{ formatTime(fault.reportedAt) }}
+              </div>
+            </div>
+          </div>
+        </div>
+
         <div class="alert-list" v-if="alerts.length > 0">
           <div class="alert-item slide-in"
                v-for="(alert, idx) in alerts"
@@ -212,7 +245,8 @@ const topStats = computed(() => [
   { label: '运行中', value: store.movingShuttles, color: '#67c23a' },
   { label: '空闲', value: store.idleShuttles, color: '#909399' },
   { label: '低电量', value: store.lowBatteryShuttles.length, color: '#e6a23c' },
-  { label: '供电告警', value: store.powerIssueShuttles.length, color: '#f56c6c' }
+  { label: '供电告警', value: store.powerIssueShuttles.length, color: '#f56c6c' },
+  { label: '轨道故障', value: store.trackFaultCount, color: '#ff7b00' }
 ])
 
 const systemStats = computed(() => {
@@ -235,6 +269,12 @@ const maxTracksPerLayer = computed(() => {
 
 const alerts = computed(() => {
   const list = []
+  store.trackFaultList.forEach(f => {
+    list.push({
+      level: 'danger',
+      text: `轨道故障 (${f.trackX},${f.trackY},${f.trackLayer}层): ${f.description || '滑触线接触不良'} [${f.shuttleCode}]`
+    })
+  })
   store.lowBatteryShuttles.forEach(s => {
     list.push({ level: 'warning', text: `穿梭车 ${s.carCode} 电量低: ${(s.batteryLevel||0).toFixed(1)}%` })
   })
@@ -245,7 +285,7 @@ const alerts = computed(() => {
     if (!l.powerOn) list.push({ level: 'danger', text: `滑触线 ${l.lineCode} 断电故障` })
     if ((l.temperature || 0) > 60) list.push({ level: 'warning', text: `滑触线 ${l.lineCode} 温度过高: ${l.temperature.toFixed(1)}℃` })
   })
-  return list.slice(0, 6)
+  return list.slice(0, 8)
 })
 
 const shuttleColorMap = {}
@@ -276,6 +316,43 @@ function tempColor(v) {
   if (v > 60) return '#f56c6c'
   if (v > 45) return '#e6a23c'
   return '#67c23a'
+}
+function formatTime(ts) {
+  if (!ts) return ''
+  const d = new Date(ts)
+  const p = n => String(n).padStart(2, '0')
+  return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
+}
+function focusOnFaultTrack(fault) {
+  if (sceneRef.value && fault) {
+    const pos = sceneRef.value.getTrackWorldPosition(fault.trackX, fault.trackY, fault.trackLayer)
+    if (pos) {
+      sceneRef.value.focusOnPosition(pos)
+    }
+  }
+}
+
+function simulateTrackFault() {
+  const x = Math.floor(Math.random() * 8)
+  const y = Math.floor(Math.random() * 5)
+  const layer = Math.floor(Math.random() * 3)
+  const before = 85 + Math.random() * 10
+  const during = 2 + Math.random() * 2
+  const fault = {
+    trackX: x,
+    trackY: y,
+    trackLayer: layer,
+    shuttleCode: 'SH-' + (100 + Math.floor(Math.random() * 4)),
+    shuttleName: '穿梭车-测试',
+    faultType: 'POWER_DIP',
+    severity: 'WARNING',
+    batteryBefore: before,
+    batteryDuring: during,
+    batteryAfter: before - 0.5,
+    reportedAt: Date.now(),
+    description: `滑触线接触不良: 电量在${1 + Math.floor(Math.random() * 2)}秒内从${before.toFixed(1)}%骤跌至${during.toFixed(1)}%后恢复`
+  }
+  store.addTrackFault(fault)
 }
 
 function selectShuttle(code) {
@@ -457,6 +534,22 @@ onUnmounted(() => {
   transition: all 0.2s;
   &:hover { background: rgba(64,158,255,0.25); }
 }
+.test-fault {
+  padding: 8px 14px;
+  border: 1px solid rgba(255, 123, 0, 0.5);
+  background: linear-gradient(135deg, rgba(255, 123, 0, 0.15), rgba(255, 80, 0, 0.1));
+  color: #ff9a3c;
+  border-radius: 6px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.2s;
+  font-weight: 600;
+  &:hover {
+    background: rgba(255, 123, 0, 0.28);
+    box-shadow: 0 0 12px rgba(255, 123, 0, 0.3);
+  }
+  &:active { transform: scale(0.96); }
+}
 
 .main-content {
   flex: 1;
@@ -623,6 +716,91 @@ onUnmounted(() => {
   background: linear-gradient(135deg, rgba(20, 30, 50, 0.9), rgba(15, 20, 40, 0.85));
   border: 1px solid rgba(64, 158, 255, 0.25);
   overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.fault-tracks-section {
+  animation: slideIn 0.4s ease-out;
+}
+.fault-header {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 8px;
+}
+.fault-title {
+  font-size: 13px; font-weight: 600;
+  color: #ff9a3c;
+  text-shadow: 0 0 8px rgba(255, 123, 0, 0.4);
+}
+.fault-track-list {
+  display: flex;
+  gap: 10px;
+  overflow-x: auto;
+  padding-bottom: 4px;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 123, 0, 0.3) transparent;
+}
+.fault-track-list::-webkit-scrollbar {
+  height: 4px;
+}
+.fault-track-list::-webkit-scrollbar-track {
+  background: transparent;
+}
+.fault-track-list::-webkit-scrollbar-thumb {
+  background: rgba(255, 123, 0, 0.3);
+  border-radius: 2px;
+}
+.fault-track-card {
+  flex: 0 0 280px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: linear-gradient(135deg, rgba(255, 123, 0, 0.12), rgba(255, 80, 0, 0.08));
+  border: 1px solid rgba(255, 123, 0, 0.4);
+  box-shadow: 0 0 12px rgba(255, 123, 0, 0.15);
+  cursor: pointer;
+  transition: all 0.25s;
+  animation: cardPulse 2s infinite ease-in-out;
+
+  &:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 16px rgba(255, 123, 0, 0.3);
+    border-color: rgba(255, 150, 0, 0.7);
+  }
+}
+.fault-track-header {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 6px;
+}
+.fault-track-coord {
+  font-size: 12px; font-weight: 600;
+  color: #ffd78a;
+  font-family: 'Consolas', monospace;
+}
+.fault-track-info {
+  display: flex; justify-content: space-between;
+  margin-bottom: 6px;
+  font-size: 11px;
+  color: #b8c5d6;
+  font-family: 'Consolas', monospace;
+}
+.fault-shuttle { color: #00d4ff; }
+.fault-battery { color: #f5a1a1; }
+.fault-track-desc {
+  font-size: 11px;
+  color: #a8b5cc;
+  line-height: 1.4;
+  margin-bottom: 6px;
+}
+.fault-track-time {
+  font-size: 10px;
+  color: #7a8aa0;
+  text-align: right;
+  font-family: 'Consolas', monospace;
+}
+@keyframes cardPulse {
+  0%, 100% { box-shadow: 0 0 12px rgba(255, 123, 0, 0.15); }
+  50% { box-shadow: 0 0 20px rgba(255, 123, 0, 0.35); }
 }
 
 .alert-list { display: flex; flex-direction: column; gap: 6px; }

@@ -3,6 +3,7 @@ package com.shuttle.rack.websocket;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.shuttle.rack.dto.ShuttlePositionUpdateDTO;
 import com.shuttle.rack.dto.SystemStatusDTO;
+import com.shuttle.rack.dto.TrackFaultDTO;
 import com.shuttle.rack.dto.WebSocketMessageDTO;
 import com.shuttle.rack.service.ShuttleCarService;
 import com.shuttle.rack.service.SystemStatusService;
@@ -114,6 +115,13 @@ public class RackWebSocketHandler extends TextWebSocketHandler {
 
     public void broadcastSystemStatus() {
         broadcast(WebSocketMessageDTO.systemStatus(systemStatusService.getSystemStatus()));
+    }
+
+    public void broadcastTrackFault(TrackFaultDTO fault) {
+        log.warn("广播轨道故障告警: 轨道({},{}-{}), 穿梭车: {}, 类型: {}",
+                fault.getTrackX(), fault.getTrackY(), fault.getTrackLayer(),
+                fault.getShuttleCode(), fault.getFaultType());
+        broadcast(WebSocketMessageDTO.trackFault(fault));
     }
 
     private <T> void sendToSession(WebSocketSession session, WebSocketMessageDTO<T> message) {

@@ -69,6 +69,27 @@ public class ShuttleCar {
     @Column(name = "total_mileage")
     private Double totalMileage = 0.0;
 
+    @Column(name = "last_battery_level")
+    private Double lastBatteryLevel = 100.0;
+
+    @Column(name = "last_battery_update_time")
+    private LocalDateTime lastBatteryUpdateTime;
+
+    @Column(name = "battery_dip_detected")
+    private Boolean batteryDipDetected = false;
+
+    @Column(name = "battery_dip_start_time")
+    private LocalDateTime batteryDipStartTime;
+
+    @Column(name = "battery_dip_x")
+    private Integer batteryDipX;
+
+    @Column(name = "battery_dip_y")
+    private Integer batteryDipY;
+
+    @Column(name = "battery_dip_layer")
+    private Integer batteryDipLayer;
+
     @Column(name = "created_at")
     private LocalDateTime createdAt;
 

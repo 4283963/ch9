@@ -78,6 +78,9 @@ export class RackSceneEngine {
     this._instancedMeshes = []
     this._allMaterials = new Set()
     this._allTextures = new Set()
+    this._faultHighlights = new Map()
+    this._faultAnimations = new Map()
+    this._unwatchTrackFaults = null
   }
 
   async init() {
@@ -251,6 +254,14 @@ export class RackSceneEngine {
     bandMat.emissiveColor = new Color3(0.3, 0.05, 0.05)
     this._sharedMaterials.set('cargoBand', bandMat)
     this._allMaterials.add(bandMat)
+
+    const faultBaseMat = new StandardMaterial('faultHighlightBase', this.scene)
+    faultBaseMat.diffuseColor = new Color3(1, 0.5, 0)
+    faultBaseMat.emissiveColor = new Color3(1, 0.4, 0)
+    faultBaseMat.alpha = 0.85
+    faultBaseMat.disableLighting = true
+    this._sharedMaterials.set('faultHighlight', faultBaseMat)
+    this._allMaterials.add(faultBaseMat)
   }
 
   _createLabelAtlas() {
@@ -359,137 +370,106 @@ export class RackSceneEngine {
 
   _buildSingleLayer(layer) {
     const baseY = layer * LAYER_HEIGHT
-    const totalNodes = this.config.rows * this.config.cols
+    const off = UNIT * 0.4
+
+    const trackPlateMat = this._sharedMaterials.get(`trackPlate_layer${layer}`)
+    const railMat = this._sharedMaterials.get(`rail_layer${layer}`)
+    const pillarMat = this._sharedMaterials.get(`pillar_layer${layer}`)
+    const beamMat = this._sharedMaterials.get(`beam_layer${layer}`)
 
     const trackPlateTemplate = MeshBuilder.CreateBox(`trackPlateTemplate_layer${layer}`, {
       width: UNIT * 0.95,
       height: 0.06,
       depth: UNIT * 0.95
     }, this.scene)
+    trackPlateTemplate.material = trackPlateMat
+    trackPlateTemplate.receiveShadows = true
     trackPlateTemplate.setEnabled(false)
-
-    const trackPlateIM = new InstancedMesh(
-      `trackPlateIM_layer${layer}`,
-      trackPlateTemplate,
-      totalNodes,
-      this.scene
-    )
-    trackPlateIM.material = this._sharedMaterials.get(`trackPlate_layer${layer}`)
-    trackPlateIM.receiveShadows = true
-    this._instancedMeshes.push(trackPlateIM)
 
     const xRailTemplate = MeshBuilder.CreateBox(`xRailTemplate_layer${layer}`, {
       width: UNIT * 0.9,
       height: 0.04,
       depth: TRACK_WIDTH
     }, this.scene)
+    xRailTemplate.material = railMat
+    xRailTemplate.receiveShadows = true
     xRailTemplate.setEnabled(false)
-
-    const xRailIM = new InstancedMesh(`xRailIM_layer${layer}`, xRailTemplate, totalNodes, this.scene)
-    xRailIM.material = this._sharedMaterials.get(`rail_layer${layer}`)
-    xRailIM.receiveShadows = true
-    this._instancedMeshes.push(xRailIM)
 
     const yRailTemplate = MeshBuilder.CreateBox(`yRailTemplate_layer${layer}`, {
       width: TRACK_WIDTH,
       height: 0.04,
       depth: UNIT * 0.9
     }, this.scene)
+    yRailTemplate.material = railMat
+    yRailTemplate.receiveShadows = true
     yRailTemplate.setEnabled(false)
-
-    const yRailIM = new InstancedMesh(`yRailIM_layer${layer}`, yRailTemplate, totalNodes, this.scene)
-    yRailIM.material = this._sharedMaterials.get(`rail_layer${layer}`)
-    yRailIM.receiveShadows = true
-    this._instancedMeshes.push(yRailIM)
 
     const pillarTemplate = MeshBuilder.CreateBox(`pillarTemplate_layer${layer}`, {
       width: 0.08,
       height: SHELF_HEIGHT,
       depth: 0.08
     }, this.scene)
+    pillarTemplate.material = pillarMat
+    pillarTemplate.receiveShadows = true
+    if (this.shadowGenerator) this.shadowGenerator.addShadowCaster(pillarTemplate)
     pillarTemplate.setEnabled(false)
-
-    const pillarIM = new InstancedMesh(`pillarIM_layer${layer}`, pillarTemplate, totalNodes * 4, this.scene)
-    pillarIM.material = this._sharedMaterials.get(`pillar_layer${layer}`)
-    pillarIM.receiveShadows = true
-    if (this.shadowGenerator) this.shadowGenerator.addShadowCaster(pillarIM)
-    this._instancedMeshes.push(pillarIM)
 
     const beamHTemplate = MeshBuilder.CreateBox(`beamHTemplate_layer${layer}`, {
       width: UNIT * 0.85, height: 0.06, depth: 0.06
     }, this.scene)
+    beamHTemplate.material = beamMat
+    beamHTemplate.receiveShadows = true
+    if (this.shadowGenerator) this.shadowGenerator.addShadowCaster(beamHTemplate)
     beamHTemplate.setEnabled(false)
-
-    const beamHIM = new InstancedMesh(`beamHIM_layer${layer}`, beamHTemplate, totalNodes * 2, this.scene)
-    beamHIM.material = this._sharedMaterials.get(`beam_layer${layer}`)
-    beamHIM.receiveShadows = true
-    if (this.shadowGenerator) this.shadowGenerator.addShadowCaster(beamHIM)
-    this._instancedMeshes.push(beamHIM)
 
     const beamVTemplate = MeshBuilder.CreateBox(`beamVTemplate_layer${layer}`, {
       width: 0.06, height: 0.06, depth: UNIT * 0.85
     }, this.scene)
+    beamVTemplate.material = beamMat
+    beamVTemplate.receiveShadows = true
+    if (this.shadowGenerator) this.shadowGenerator.addShadowCaster(beamVTemplate)
     beamVTemplate.setEnabled(false)
 
-    const beamVIM = new InstancedMesh(`beamVIM_layer${layer}`, beamVTemplate, totalNodes * 2, this.scene)
-    beamVIM.material = this._sharedMaterials.get(`beam_layer${layer}`)
-    beamVIM.receiveShadows = true
-    if (this.shadowGenerator) this.shadowGenerator.addShadowCaster(beamVIM)
-    this._instancedMeshes.push(beamVIM)
-
-    const trackMat = new Matrix()
-    const xRailMat = new Matrix()
-    const yRailMat = new Matrix()
-    const pMat1 = new Matrix()
-    const pMat2 = new Matrix()
-    const pMat3 = new Matrix()
-    const pMat4 = new Matrix()
-    const beamMat1 = new Matrix()
-    const beamMat2 = new Matrix()
-    const beamMat3 = new Matrix()
-    const beamMat4 = new Matrix()
-
-    const off = UNIT * 0.4
-    let nodeIdx = 0
-
+    const layerMeshes = []
     for (let y = 0; y < this.config.rows; y++) {
       for (let x = 0; x < this.config.cols; x++) {
         const px = x * UNIT
         const py = baseY + 0.02
         const pz = y * UNIT
 
-        Matrix.TranslationToRef(px, py, pz, trackMat)
-        trackPlateIM.setMatrixAtIndex(nodeIdx, trackMat)
+        const tp = trackPlateTemplate.createInstance(`tp_${layer}_${y}_${x}`)
+        tp.position.set(px, py, pz)
+        layerMeshes.push(tp)
 
-        Matrix.TranslationToRef(px, py + 0.04, pz - UNIT * 0.2, xRailMat)
-        xRailIM.setMatrixAtIndex(nodeIdx, xRailMat)
+        const xr = xRailTemplate.createInstance(`xr_${layer}_${y}_${x}`)
+        xr.position.set(px, py + 0.04, pz - UNIT * 0.2)
+        layerMeshes.push(xr)
 
-        Matrix.TranslationToRef(px - UNIT * 0.2, py + 0.04, pz, yRailMat)
-        yRailIM.setMatrixAtIndex(nodeIdx, yRailMat)
+        const yr = yRailTemplate.createInstance(`yr_${layer}_${y}_${x}`)
+        yr.position.set(px - UNIT * 0.2, py + 0.04, pz)
+        layerMeshes.push(yr)
 
         const pillarBaseY = baseY + 0.05 + SHELF_HEIGHT / 2
-
-        Matrix.TranslationToRef(px - off, pillarBaseY, pz - off, pMat1)
-        Matrix.TranslationToRef(px + off, pillarBaseY, pz - off, pMat2)
-        Matrix.TranslationToRef(px - off, pillarBaseY, pz + off, pMat3)
-        Matrix.TranslationToRef(px + off, pillarBaseY, pz + off, pMat4)
-
-        pillarIM.setMatrixAtIndex(nodeIdx * 4, pMat1)
-        pillarIM.setMatrixAtIndex(nodeIdx * 4 + 1, pMat2)
-        pillarIM.setMatrixAtIndex(nodeIdx * 4 + 2, pMat3)
-        pillarIM.setMatrixAtIndex(nodeIdx * 4 + 3, pMat4)
+        const p1 = pillarTemplate.createInstance(`p1_${layer}_${y}_${x}`)
+        p1.position.set(px - off, pillarBaseY, pz - off)
+        const p2 = pillarTemplate.createInstance(`p2_${layer}_${y}_${x}`)
+        p2.position.set(px + off, pillarBaseY, pz - off)
+        const p3 = pillarTemplate.createInstance(`p3_${layer}_${y}_${x}`)
+        p3.position.set(px - off, pillarBaseY, pz + off)
+        const p4 = pillarTemplate.createInstance(`p4_${layer}_${y}_${x}`)
+        p4.position.set(px + off, pillarBaseY, pz + off)
+        layerMeshes.push(p1, p2, p3, p4)
 
         const beamY = baseY + 0.05 + SHELF_HEIGHT
-
-        Matrix.TranslationToRef(px, beamY, pz - off, beamMat1)
-        Matrix.TranslationToRef(px, beamY, pz + off, beamMat2)
-        Matrix.TranslationToRef(px - off, beamY, pz, beamMat3)
-        Matrix.TranslationToRef(px + off, beamY, pz, beamMat4)
-
-        beamHIM.setMatrixAtIndex(nodeIdx * 2, beamMat1)
-        beamHIM.setMatrixAtIndex(nodeIdx * 2 + 1, beamMat2)
-        beamVIM.setMatrixAtIndex(nodeIdx * 2, beamMat3)
-        beamVIM.setMatrixAtIndex(nodeIdx * 2 + 1, beamMat4)
+        const bh1 = beamHTemplate.createInstance(`bh1_${layer}_${y}_${x}`)
+        bh1.position.set(px, beamY, pz - off)
+        const bh2 = beamHTemplate.createInstance(`bh2_${layer}_${y}_${x}`)
+        bh2.position.set(px, beamY, pz + off)
+        const bv1 = beamVTemplate.createInstance(`bv1_${layer}_${y}_${x}`)
+        bv1.position.set(px - off, beamY, pz)
+        const bv2 = beamVTemplate.createInstance(`bv2_${layer}_${y}_${x}`)
+        bv2.position.set(px + off, beamY, pz)
+        layerMeshes.push(bh1, bh2, bv1, bv2)
 
         const key = `${layer}-${y}-${x}`
         this.trackMeshes.set(key, { x, y, layer, position: new Vector3(px, py, pz) })
@@ -497,24 +477,10 @@ export class RackSceneEngine {
         if (Math.random() < 0.15 && !(x === 0 && y === 0)) {
           this._buildCargoBox(x, y, layer, baseY, `cargo_${key}`)
         }
-
-        nodeIdx++
       }
     }
 
-    trackPlateIM.refreshBoundingInfo()
-    xRailIM.refreshBoundingInfo()
-    yRailIM.refreshBoundingInfo()
-    pillarIM.refreshBoundingInfo()
-    beamHIM.refreshBoundingInfo()
-    beamVIM.refreshBoundingInfo()
-
-    trackPlateTemplate.dispose()
-    xRailTemplate.dispose()
-    yRailTemplate.dispose()
-    pillarTemplate.dispose()
-    beamHTemplate.dispose()
-    beamVTemplate.dispose()
+    this._instancedMeshes.push(...layerMeshes)
   }
 
   _buildCargoBox(x, y, layer, baseY, cargoKey) {
@@ -727,6 +693,215 @@ export class RackSceneEngine {
         this._removeShuttle(code)
       })
     }, 100)
+
+    this._faultCheckInterval = setInterval(() => {
+      this._updateTrackFaultHighlights()
+    }, 200)
+  }
+
+  _updateTrackFaultHighlights() {
+    if (!this.store) return
+    const faults = this.store.trackFaultList
+    const existingKeys = new Set(this._faultHighlights.keys())
+
+    faults.forEach(fault => {
+      const key = fault.faultKey
+      existingKeys.delete(key)
+      if (!this._faultHighlights.has(key)) {
+        this._createFaultHighlight(fault)
+      }
+    })
+
+    existingKeys.forEach(key => {
+      this._removeFaultHighlight(key)
+    })
+  }
+
+  _createFaultHighlight(fault) {
+    const key = fault.faultKey
+    if (this._faultHighlights.has(key)) return
+
+    const baseY = fault.trackLayer * LAYER_HEIGHT + 0.03
+
+    const group = new Mesh(`faultHighlight_${key}`, this.scene)
+    group.position = new Vector3(
+      fault.trackX * UNIT,
+      baseY,
+      fault.trackY * UNIT
+    )
+
+    const highlightPlate = MeshBuilder.CreateBox(`faultPlate_${key}`, {
+      width: UNIT * 0.98,
+      height: 0.02,
+      depth: UNIT * 0.98
+    }, this.scene)
+    highlightPlate.parent = group
+
+    const mat = this._sharedMaterials.get('faultHighlight').clone(`faultMat_${key}`)
+    this._allMaterials.add(mat)
+    highlightPlate.material = mat
+    if (this.glowLayer) {
+      this.glowLayer.addIncludedOnlyMesh(highlightPlate)
+    }
+
+    const bars = []
+    for (let i = 0; i < 3; i++) {
+      const bar = MeshBuilder.CreateBox(`faultBar_${key}_${i}`, {
+        width: UNIT * 0.9,
+        height: 0.015,
+        depth: 0.08
+      }, this.scene)
+      bar.parent = group
+      bar.position = new Vector3(
+        (i - 1) * UNIT * 0.25,
+        0.015,
+        0
+      )
+      const barMat = new StandardMaterial(`faultBarMat_${key}_${i}`, this.scene)
+      barMat.emissiveColor = new Color3(1, 0.3, 0)
+      barMat.disableLighting = true
+      bar.material = barMat
+      this._allMaterials.add(barMat)
+      bars.push({ mesh: bar, mat: barMat })
+      if (this.glowLayer) {
+        this.glowLayer.addIncludedOnlyMesh(bar)
+      }
+    }
+
+    const xRail = MeshBuilder.CreateBox(`faultRailX_${key}`, {
+      width: UNIT * 0.95,
+      height: 0.02,
+      depth: TRACK_WIDTH * 1.5
+    }, this.scene)
+    xRail.parent = group
+    xRail.position = new Vector3(0, 0.01, -UNIT * 0.2)
+    const xRailMat = new StandardMaterial(`faultRailXMat_${key}`, this.scene)
+    xRailMat.emissiveColor = new Color3(1, 0.6, 0.2)
+    xRailMat.disableLighting = true
+    xRail.material = xRailMat
+    this._allMaterials.add(xRailMat)
+    if (this.glowLayer) {
+      this.glowLayer.addIncludedOnlyMesh(xRail)
+    }
+
+    const yRail = MeshBuilder.CreateBox(`faultRailY_${key}`, {
+      width: TRACK_WIDTH * 1.5,
+      height: 0.02,
+      depth: UNIT * 0.95
+    }, this.scene)
+    yRail.parent = group
+    yRail.position = new Vector3(-UNIT * 0.2, 0.01, 0)
+    yRail.material = xRailMat
+
+    const pulseAnim = new Animation(
+      `faultPulse_${key}`,
+      'material.emissiveColor',
+      8,
+      Animation.ANIMATIONTYPE_COLOR3,
+      Animation.ANIMATIONLOOPMODE_CYCLE
+    )
+
+    const colorKeys = [
+      { frame: 0, value: new Color3(1, 0.6, 0.1) },
+      { frame: 10, value: new Color3(1, 0.2, 0) },
+      { frame: 20, value: new Color3(1, 0.7, 0.2) },
+      { frame: 30, value: new Color3(1, 0.3, 0.05) },
+      { frame: 40, value: new Color3(1, 0.6, 0.1) }
+    ]
+    pulseAnim.setKeys(colorKeys)
+
+    const ease = new CubicEase()
+    ease.setEasingMode(EasingFunction.EASINGMODE_EASEINOUT)
+    pulseAnim.setEasingFunction(ease)
+
+    const alphaAnim = new Animation(
+      `faultAlpha_${key}`,
+      'material.alpha',
+      8,
+      Animation.ANIMATIONTYPE_FLOAT,
+      Animation.ANIMATIONLOOPMODE_CYCLE
+    )
+    alphaAnim.setKeys([
+      { frame: 0, value: 0.9 },
+      { frame: 20, value: 0.5 },
+      { frame: 40, value: 0.9 }
+    ])
+    alphaAnim.setEasingFunction(ease)
+
+    highlightPlate.animations = [pulseAnim, alphaAnim]
+    this.scene.beginAnimation(highlightPlate, 0, 40, true, 1.0)
+
+    bars.forEach((bar, idx) => {
+      const barPulse = pulseAnim.clone(`barPulse_${key}_${idx}`)
+      barPulse.setKeys([
+        { frame: 0, value: new Color3(1, 0.7, 0.3) },
+        { frame: 10, value: new Color3(0.8, 0.1, 0) },
+        { frame: 20, value: new Color3(1, 0.5, 0.1) },
+        { frame: 30, value: new Color3(0.9, 0.2, 0.05) },
+        { frame: 40, value: new Color3(1, 0.7, 0.3) }
+      ])
+      bar.mesh.animations = [barPulse]
+      this.scene.beginAnimation(bar.mesh, 0, 40, true, 1.0 + idx * 0.2)
+    })
+
+    this._faultAnimations.set(key, {
+      plateAnim: pulseAnim,
+      alphaAnim,
+      barAnims: bars.map(b => b.mesh.animations[0])
+    })
+
+    group.metadata = {
+      faultKey: key,
+      plate: highlightPlate,
+      bars,
+      xRail,
+      yRail,
+      mat,
+      barMats: bars.map(b => b.mat),
+      xRailMat
+    }
+
+    this._faultHighlights.set(key, group)
+
+    console.log(`[3D] 故障轨道高亮已创建: (${fault.trackX},${fault.trackY},${fault.trackLayer})`)
+  }
+
+  _removeFaultHighlight(key) {
+    const group = this._faultHighlights.get(key)
+    if (!group) return
+
+    this.scene.stopAnimation(group)
+    group.getChildMeshes().forEach(m => {
+      this.scene.stopAnimation(m)
+      if (m.geometry) m.geometry.dispose()
+      m.dispose()
+    })
+
+    if (group.metadata) {
+      const meta = group.metadata
+      if (meta.mat) {
+        this._allMaterials.delete(meta.mat)
+        meta.mat.dispose()
+      }
+      if (meta.barMats) {
+        meta.barMats.forEach(m => {
+          this._allMaterials.delete(m)
+          m.dispose()
+        })
+      }
+      if (meta.xRailMat) {
+        this._allMaterials.delete(meta.xRailMat)
+        meta.xRailMat.dispose()
+      }
+    }
+
+    if (group.geometry) group.geometry.dispose()
+    group.dispose()
+
+    this._faultHighlights.delete(key)
+    this._faultAnimations.delete(key)
+
+    console.log(`[3D] 故障轨道高亮已移除: ${key}`)
   }
 
   _renderShuttle(shuttle) {
@@ -1013,7 +1188,39 @@ export class RackSceneEngine {
     this.scene.beginDirectAnimation(this.camera, [anim], 0, 40, false)
   }
 
-  resetCamera() {
+  getTrackWorldPosition(x, y, layer) {
+    const { TRACK_UNIT, LAYER_HEIGHT } = this
+    return new Vector3(
+      (x - this.config.cols / 2 + 0.5) * TRACK_UNIT,
+      layer * LAYER_HEIGHT + 0.1,
+      (y - this.config.rows / 2 + 0.5) * TRACK_UNIT
+    )
+  }
+
+  focusOnPosition(pos) {
+    if (!this.camera || !pos) return
+
+    const ease = new CubicEase()
+    ease.setEasingMode(EasingFunction.EASINGMODE_EASEINOUT)
+
+    const targetAnim = new Animation('camTarget', 'target', 60, Animation.ANIMATIONTYPE_VECTOR3, 0)
+    targetAnim.setKeys([
+      { frame: 0, value: this.camera.target.clone() },
+      { frame: 45, value: pos }
+    ])
+    targetAnim.setEasingFunction(ease)
+
+    const radiusAnim = new Animation('camRadius', 'radius', 60, Animation.ANIMATIONTYPE_FLOAT, 0)
+    radiusAnim.setKeys([
+      { frame: 0, value: this.camera.radius },
+      { frame: 45, value: Math.min(this.camera.radius, 12) }
+    ])
+    radiusAnim.setEasingFunction(ease)
+
+    this.scene.beginDirectAnimation(this.camera, [targetAnim, radiusAnim], 0, 45, false)
+  }
+
+  focusOnLayer(layerIndex) {
     if (!this.camera) return
     const centerX = (this.config.cols - 1) * UNIT / 2
     const centerZ = (this.config.rows - 1) * UNIT / 2
@@ -1026,7 +1233,14 @@ export class RackSceneEngine {
 
   dispose() {
     this._pollInterval && clearInterval(this._pollInterval)
+    this._faultCheckInterval && clearInterval(this._faultCheckInterval)
     window.removeEventListener('resize', this._resizeHandler)
+
+    this._faultHighlights.forEach((group, key) => {
+      this._removeFaultHighlight(key)
+    })
+    this._faultHighlights.clear()
+    this._faultAnimations.clear()
 
     if (this._pointerObserver && this.scene) {
       this.scene.onPointerObservable.remove(this._pointerObserver)
@@ -1071,9 +1285,15 @@ export class RackSceneEngine {
     this.cargoMeshes.clear()
 
     this._instancedMeshes.forEach(im => {
-      if (im.sourceMesh) im.sourceMesh.dispose()
-      if (im.geometry) im.geometry.dispose()
-      im.dispose()
+      try {
+        if (im.geometry && !im.isDisposed()) {
+          if (im.sourceMesh && im.sourceMesh.geometry === im.geometry) {
+          } else {
+            im.geometry.dispose()
+          }
+        }
+        if (!im.isDisposed()) im.dispose()
+      } catch (e) { /* ignore */ }
     })
     this._instancedMeshes = []
 

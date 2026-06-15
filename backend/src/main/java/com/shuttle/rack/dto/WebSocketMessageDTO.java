@@ -41,4 +41,8 @@ public class WebSocketMessageDTO<T> {
     public static WebSocketMessageDTO<SystemStatusDTO> systemStatus(SystemStatusDTO status) {
         return of("SYSTEM_STATUS", status);
     }
+
+    public static WebSocketMessageDTO<TrackFaultDTO> trackFault(TrackFaultDTO fault) {
+        return of("TRACK_FAULT", fault);
+    }
 }
